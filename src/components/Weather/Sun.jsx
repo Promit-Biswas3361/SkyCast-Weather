@@ -4,11 +4,12 @@ import sunset from "../../assets/sunset.png";
 import "./Sun.css";
 
 const getTime = (unixTime, offset) => {
-  const date = new Date(unixTime * 1000);
+  const date = new Date((unixTime + offset) * 1000);
   return date.toLocaleTimeString("en-US", {
     hour: "2-digit",
     minute: "2-digit",
-    hour12: true
+    hour12: true,
+    timeZone: "UTC",
   });
 };
 
