@@ -1,0 +1,85 @@
+.weather-container {
+  background-color: rgba(255, 255, 255, 0.15);
+  border-radius: 15px;
+  position: relative;
+  padding: 5px 25px;
+  flex: 0.5;
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+}
+
+.main-details {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  flex: 0.5;
+}
+
+.main-details > p {
+  margin-top: 2px;
+}
+
+.main-details > h2 {
+  margin-bottom: 2px;
+}
+
+.location {
+  display: flex;
+  flex-direction: row;
+  position: relative;
+  right: 8%;
+  padding: 2px;
+  width: 90%;
+}
+
+.location-icon {
+  position: relative;
+  top: 30%;
+  margin-right: 5px;
+}
+
+.temperature {
+  position: relative;
+  bottom: 3%;
+}
+
+.temperature > h3 {
+  position: relative;
+  bottom: 17%;
+}
+
+.temperature > p {
+  position: relative;
+  bottom: 15%;
+}
+
+.more-details {
+  display: flex;
+  flex-direction: column;
+  margin-left: 35px;
+  height: 10px;
+  flex: 0.3;
+  position: relative;
+  top: 5%;
+}
+
+.card,
+.location {
+  background-color: rgba(0, 0, 0, 0.17);
+  margin: 10px;
+  border-radius: 10px;
+  padding: 0px 10px;
+}
+
+.card > .figure {
+  display: flex;
+  flex-direction: row;
+}
+
+.figure > img {
+  max-height: 35px;
+  margin-left: 25px;
+  position: relative;
+  top: 8px;
+}

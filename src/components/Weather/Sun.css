@@ -1,0 +1,21 @@
+.main-container {
+  padding: 0px;
+  flex: 0.5;
+  display: flex;
+  flex-direction: row;
+  height: 275px;
+  position: relative;
+  bottom: 3%;
+  margin-left: 80px;
+}
+
+.card {
+  text-align: center;
+  padding: 0px 15px;
+  background-color: rgba(255, 255, 255, 0.15);
+}
+
+.card > img {
+  max-height: 85px;
+  margin-top: 20px;
+}
