@@ -35,7 +35,7 @@ const Forecast = ({ latitude, longitude }) => {
 
   return (
     <div className="outer-container">
-      <h2>7-Day Forecast</h2>
+      <h2>6-Day Forecast</h2>
       <ul>
         {forecast.map((day, index) => (
           <li key={index}>

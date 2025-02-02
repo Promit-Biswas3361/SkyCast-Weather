@@ -15,7 +15,7 @@ function App() {
   const [latitude, setLatitude] = useState(null);
   const [longitude, setLongitude] = useState(null);
   const [loading, setLoading] = useState(true);
-  const defaultCity = "Manipal";
+  const defaultCity = "Delhi";
 
   const fetchCoordinates = async (city, apiKey) => {
     if (!city.trim()) return null;
