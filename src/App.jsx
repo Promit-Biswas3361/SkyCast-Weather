@@ -7,12 +7,14 @@ import Map from "./components/Map";
 import axios from "axios";
 import Sun from "./components/Weather/Sun";
 import Forecast from "./components/Weather/Forecast";
+import loader from "./assets/loader.png";
 
 function App() {
   const [weatherData, setWeatherData] = useState(null);
   const [current_city, setCurrent_city] = useState(null);
   const [latitude, setLatitude] = useState(null);
   const [longitude, setLongitude] = useState(null);
+  const [loading, setLoading] = useState(true);
   const defaultCity = "Manipal";
 
   const fetchCoordinates = async (city, apiKey) => {
@@ -44,8 +46,12 @@ function App() {
       return;
     }
 
+    setLoading(true);
     const coordinates = await fetchCoordinates(city, apiKey);
-    if (!coordinates) return;
+    if (!coordinates) {
+      setLoading(false);
+      return;
+    }
 
     setLatitude(coordinates.latitude);
     setLongitude(coordinates.longitude);
@@ -65,11 +71,13 @@ function App() {
         aqi: aqiResponse.data.overall_aqi,
       };
 
+      setLoading(false);
       setWeatherData(updatedWeatherData);
       console.log(updatedWeatherData);
     } catch (error) {
       console.error("Error fetching weather data: ", error);
       alert("Error fetching data.");
+      setLoading(false);
     }
   };
 
@@ -78,24 +86,31 @@ function App() {
   }, []);
 
   return (
-    <div className="app-body">
-      <Navbar fetchWeatherData={fetchWeatherData} className="Navbar" />
-      <div className="container">
-        <div className="weather-info">
-          <div className="row">
-            <Weather weatherData={weatherData} city={current_city} />
-            <Map latitude={latitude} longitude={longitude} />
+    <>
+      <div className={`app-body ${loading ? "loading" : ""}`}>
+        <Navbar fetchWeatherData={fetchWeatherData} className="Navbar" />
+        <div className="container">
+          <div className="weather-info">
+            <div className="row">
+              <Weather weatherData={weatherData} city={current_city} />
+              <Map latitude={latitude} longitude={longitude} />
+            </div>
+            <div className="row">
+              <Details weatherData={weatherData} />
+              <Sun weatherData={weatherData} />
+            </div>
           </div>
-          <div className="row">
-            <Details weatherData={weatherData} />
-            <Sun weatherData={weatherData} />
+          <div className="future-forecast">
+            <Forecast latitude={latitude} longitude={longitude} />
           </div>
-        </div>
-        <div className="future-forecast">
-          <Forecast latitude={latitude} longitude={longitude} />
         </div>
       </div>
-    </div>
+      {loading && (
+        <div className="loader-container">
+          <img src={loader} alt="Loading..." className="loader" />
+        </div>
+      )}
+    </>
   );
 }
 

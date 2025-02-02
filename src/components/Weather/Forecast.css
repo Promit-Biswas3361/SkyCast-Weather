@@ -1,5 +1,5 @@
 .outer-container {
-  max-height: 95vh;
+  height: 93.5vh;
   width: 20vw;
   background-color: rgba(255, 255, 255, 0.15);
   border-radius: 15px;
@@ -17,8 +17,8 @@ li {
   text-align: center;
   background-color: rgba(0, 0, 0, 0.15);
   border-radius: 10px;
-  margin: 6.2%;
-  padding: 7px 10px;
+  margin: 9.5% 6.2%;
+  padding: 10px;
   width: 107%;
   position: relative;
   right: 21%;
