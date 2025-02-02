@@ -35,12 +35,22 @@ const Forecast = ({ latitude, longitude }) => {
 
   return (
     <div className="outer-container">
-      <h2>5-Day Forecast</h2>
+      <h2>7-Day Forecast</h2>
       <ul>
         {forecast.map((day, index) => (
           <li key={index}>
-            <strong>{new Date(day.startTime).toLocaleDateString()}</strong>:
-            {day.values.temperature}°C, {day.values.weatherCode}
+            <div className="daily-forecast">
+              <p>
+                {new Date(day.startTime).toLocaleDateString("en-US", {
+                  weekday: "long",
+                  day: "numeric",
+                  month: "short",
+                })}
+              </p>
+              <p>
+                <b>{day.values.temperature}°C</b>
+              </p>
+            </div>
           </li>
         ))}
       </ul>

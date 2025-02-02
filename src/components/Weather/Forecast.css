@@ -1,5 +1,25 @@
-.outer-container {    
+.outer-container {
   max-height: 95vh;
+  width: 20vw;
   background-color: rgba(255, 255, 255, 0.15);
   border-radius: 15px;
+  padding: 5px 25px;
+}
+
+li {
+  list-style: none;
+}
+
+.daily-forecast {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  text-align: center;
+  background-color: rgba(0, 0, 0, 0.15);
+  border-radius: 10px;
+  margin: 6.2%;
+  padding: 7px 10px;
+  width: 107%;
+  position: relative;
+  right: 21%;
 }
