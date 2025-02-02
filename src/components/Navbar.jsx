@@ -15,6 +15,12 @@ const Navbar = ({ fetchWeatherData }) => {
     setItem("");
   };
 
+  const handleKeyPress = (e) => {
+    if (e.key === "Enter") {
+      handleSearch();
+    }
+  };
+
   return (
     <div className="navbar">
       <div className="app_details">
@@ -26,6 +32,7 @@ const Navbar = ({ fetchWeatherData }) => {
         <input
           type="text"
           value={item}
+          onKeyDown={handleKeyPress}
           onChange={handleChange}
           placeholder="Enter a city..."
         />
