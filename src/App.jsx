@@ -24,7 +24,6 @@ function App() {
       const response = await axios.get(
         `https://api.openweathermap.org/geo/1.0/direct?q=${city}&limit=1&appid=${apiKey}`
       );
-      console.log(response.data);
       setCurrent_city(response.data[0].name);
 
       return {
@@ -42,7 +41,7 @@ function App() {
     const apiKey = import.meta.env.VITE_WEATHER_API_KEY;
     const ninjaApi = import.meta.env.VITE_API_NINJA_API_KEY;
     if (!apiKey || !ninjaApi) {
-      alert("API Key is missing! Check your .env file.");
+      alert("API Key is missing!");
       return;
     }
 
@@ -73,7 +72,6 @@ function App() {
 
       setLoading(false);
       setWeatherData(updatedWeatherData);
-      console.log(updatedWeatherData);
     } catch (error) {
       console.error("Error fetching weather data: ", error);
       alert("Error fetching data.");

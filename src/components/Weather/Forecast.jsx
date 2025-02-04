@@ -8,7 +8,7 @@ const Forecast = ({ latitude, longitude }) => {
   const getForecast = async (latitude, longitude) => {
     const apiKey = import.meta.env.VITE_TOMORROW_IO_API_KEY;
     if (!apiKey) {
-      alert("API Key is missing! Check your .env file.");
+      alert("API Key is missing!");
       return;
     }
 
@@ -18,7 +18,6 @@ const Forecast = ({ latitude, longitude }) => {
       );
 
       setForecast(response.data.data.timelines[0].intervals);
-      console.log(response.data);
     } catch (error) {
       console.error("Error fetching weather data: ", error);
       alert("Error fetching forecast data.");
