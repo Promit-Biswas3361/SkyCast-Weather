@@ -1,0 +1,913 @@
+---------------------------------------------------  agent.py  -----------------------------------------------------------
+
+import pandas as pd
+from google.adk.models.google_llm import Gemini
+from google.genai import Client, types
+from google.auth.api_key import Credentials
+from google.adk.agents import Agent
+from functools import cached_property
+import os
+import csv
+import re
+import io
+from typing import List, Dict, Any, Union, TextIO
+
+from dbs.langchain.stork import StorkAuthClient
+from pandas import read_excel
+
+from .checks import validation_checks
+from .outputFileGenerator import create_output_dataframe_with_validation
+
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+def classify_cr_from_excel_file_pandas(file_object: Union[TextIO, io.BytesIO, str], file_extension: str) -> dict:
+    try:
+        # Determine the file-like object or string to pass to pandas
+        if isinstance(file_object, str):
+            # If it's a string, assume it's the content and wrap in StringIO
+            file_to_read = io.StringIO(file_object)
+        elif isinstance(file_object, io.BytesIO):
+            # For BytesIO, decode and wrap in StringIO
+            file_to_read = io.StringIO(file_object.read().decode('utf-8'))
+        elif isinstance(file_object, io.TextIOBase):
+            # For TextIOBase, just use it directly
+            file_to_read = file_object
+        else:
+            return {
+                "status": "error",
+                "error_message": f"Unexpected type for file_object: {type(file_object)}. Expected str, TextIO, or BytesIO."
+            }
+
+        if file_extension.lower() not in ("csv", "tsv", "txt"):
+            return {
+                "status": "error",
+                "error_message": f"Unsupported file type: .{file_extension}. Only .csv, .tsv and .txt files are supported."
+            }
+
+        try:
+            df = pd.read_csv(file_to_read, sep=None, engine='python')
+
+            # Remove any entirely empty rows (where all values are NaN or whitespace)
+            df.dropna(how='all', inplace=True)
+            if df.empty:
+                return {
+                    "status": "error",
+                    "error_message": "Processed file content is empty. No data to classify."
+                }
+
+        except pd.errors.EmptyDataError:
+            return {
+                "status": "error",
+                "error_message": "Processed file content is empty. No data to classify."
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "error_message": f"Error reading file with pandas: {str(e)}"
+            }
+
+        original_fieldnames = list(df.columns)
+
+        ticket_col = find_column(original_fieldnames, ['TicketNumber', 'Ticket Number', 'Ticket_Number', 'CR_ID', 'CR ID', 'ID'])
+        implementer_col = find_column(original_fieldnames, ['ImplementerGroup', 'Implementer Group', 'Implementer_Group', 'ImplementerGroups'])
+        deployment_col = find_column(original_fieldnames, ['Deployment Approach', 'DeploymentApproach', 'Deployment_Approach', 'Deployment'])
+
+        # Check if required columns are found
+        missing_columns = []
+        if not ticket_col:
+            missing_columns.append("TicketNumber")
+        if not implementer_col:
+            missing_columns.append("ImplementerGroup")
+        if not deployment_col:
+            missing_columns.append("Deployment Approach")
+
+        if missing_columns:
+            return {
+                "status": "error",
+                "error_message": f"Required columns not found: {', '.join(missing_columns)}",
+                "available_columns": original_fieldnames,
+                "suggestion": "Please ensure your file has columns: TicketNumber, ImplementerGroup, Deployment Approach (case-insensitive and space-agnostic matching)."
+            }
+
+        classification_results = []
+        auto_count = 0
+        hybrid_count = 0
+        manual_count = 0
+        unclassified_count = 0
+
+        print(f"✅ Found required columns:")
+        print(f"   📋 TicketNumber: '{ticket_col}'")
+        print(f"   👥 ImplementerGroup: '{implementer_col}'")
+        print(f"   🚀 Deployment Approach: '{deployment_col}'\n")
+
+        total_crs = 0
+        # Iterate over DataFrame rows
+        for row_num, row_series in df.iterrows():
+            total_crs += 1
+            # row_num from iterrows is 0-indexed, add 2 to match original function's 1-indexed (header + 1)
+            original_row_index = row_num + 2
+
+            ticket_number = str(row_series.get(ticket_col, '')).strip()
+            implementer_group = str(row_series.get(implementer_col, '')).strip()
+            deployment_approach = str(row_series.get(deployment_col, '')).strip()
+
+            # Skip empty rows (already handled by df.dropna(how='all'), but keeping this for robustness
+            # in case some columns are present but others are empty. This check is more specific to the core columns)
+            if not ticket_number and not implementer_group and not deployment_approach:
+                total_crs -= 1 # Revert count if row is truly empty based on key columns
+                continue
+
+            cr_classification = classify_single_cr(
+                ticket_number, implementer_group, deployment_approach, original_row_index, row_series.to_dict()
+            )
+            classification_results.append(cr_classification)
+
+            # Count classifications
+            cr_type = cr_classification["classification"].lower()
+            if cr_type == "auto":
+                auto_count += 1
+            elif cr_type == "hybrid":
+                hybrid_count += 1
+            elif cr_type == "manual":
+                manual_count += 1
+            else:
+                unclassified_count += 1
+
+        output_directory = os.path.join(os.path.expanduser("~"), "Downloads")
+        output_file = "results_file.csv"
+        output_filepath = os.path.join(output_directory, output_file)
+
+        output_result = create_output_dataframe_with_validation(
+            df=df,
+            classification_results=classification_results,
+            output_filepath=output_filepath
+        )
+
+        if output_result is None:
+            print(f"Output saved successfully to {output_filepath}")
+        else:
+            # This branch would execute if output_filepath was not provided
+            print("Output content returned as string (should not happen if output_filepath is given).")
+
+        return {
+            "status": "success",
+            "found_columns": {
+                "ticket_number": ticket_col,
+                "implementer_group": implementer_col,
+                "deployment_approach": deployment_col
+            },
+            "summary": {
+                "total_crs": total_crs,
+                "auto_crs": auto_count,
+                "hybrid_crs": hybrid_count,
+                "manual_crs": manual_count,
+                "unclassified_crs": unclassified_count,
+                "classification_rate": f"{((total_crs - unclassified_count) / total_crs * 100):.1f}%" if total_crs > 0 else "0%"
+            },
+            "detailed_results": classification_results[:25],  # Show first 25 for readability
+            "total_results_count": len(classification_results)
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "error_message": f"Error processing file content: {str(e)}"
+        }
+
+def find_column(fieldnames: List[str], possible_names: List[str]) -> str:
+    """Find column name from possible variations (case-insensitive)."""
+    for possible_name in possible_names:
+        for fieldname in fieldnames:
+            if possible_name.lower().replace(' ', '').replace('_', '') == fieldname.lower().replace(' ', '').replace(
+                    '_', ''):
+                return fieldname
+    return ""
+
+def classify_single_cr(ticket_number: str, implementer_group: str, deployment_approach: str, row_num: int, row: dict) -> dict:
+    """
+    Classifies a single CR based on ImplementerGroup and Deployment Approach.
+
+    Args:
+        ticket_number (str): Ticket number/ID
+        implementer_group (str): Implementer group(s)
+        deployment_approach (str): Deployment approach(es)
+        row_num (int): Row number for reference
+
+    Returns:
+        dict: Classification result for the single CR
+    """
+    result = {
+        "row_number": row_num,
+        "ticket_number": ticket_number or f"Row_{row_num}",
+        "implementer_group": implementer_group,
+        "deployment_approach": deployment_approach,
+        "classification": "Unclassified",
+        "confidence": "Low",
+        "reasoning": [],
+        "issues": [],
+        "validation": []
+    }
+
+    result['validation'] = validation_checks(row)
+
+    # Check for missing data
+    if not implementer_group:
+        result["issues"].append("❌ ImplementerGroup is empty")
+        result["reasoning"].append("Cannot classify without ImplementerGroup")
+        return result
+
+    if not deployment_approach:
+        result["issues"].append("❌ Deployment Approach is empty")
+        result["reasoning"].append("Cannot classify without Deployment Approach")
+        return result
+
+    # Parse implementer groups and deployment approaches
+    groups = [g.strip() for g in implementer_group.split(',') if g.strip()]
+    approaches = [a.strip() for a in deployment_approach.split(',') if a.strip()]
+
+    # Check for specific patterns
+    has_apprlse = "PSG_DBSAPP_APPRLSE" in groups
+    other_psg_groups = [g for g in groups if re.match(r'PSG_DBSAPP_\w+', g) and g != "PSG_DBSAPP_APPRLSE"]
+
+    # Check deployment approaches
+    has_cicd = any("CICD" in approach or "CI/CD" in approach for approach in approaches)
+    has_manual = any("Manual" in approach for approach in approaches)
+
+    # Classification logic
+    if (has_apprlse and not other_psg_groups and
+            len(groups) == 1 and has_cicd and not has_manual):
+        # AUTO CR
+        result["classification"] = "Auto"
+        result["confidence"] = "High"
+        result["reasoning"] = [
+            "✅ Single implementer group: PSG_DBSAPP_APPRLSE",
+            "✅ Deployment approach contains CICD",
+            "✅ No manual deployment mentioned"
+        ]
+
+    elif (has_apprlse and other_psg_groups and has_cicd and has_manual):
+        # HYBRID CR
+        result["classification"] = "Hybrid"
+        result["confidence"] = "High"
+        result["reasoning"] = [
+            "✅ Has PSG_DBSAPP_APPRLSE group",
+            f"✅ Has additional PSG groups: {', '.join(other_psg_groups)}",
+            "✅ Has both CICD and Manual deployment approaches"
+        ]
+
+    elif (not has_apprlse and other_psg_groups and
+          not has_cicd and has_manual):
+        # MANUAL CR
+        result["classification"] = "Manual"
+        result["confidence"] = "High"
+        result["reasoning"] = [
+            f"✅ Implementer group: {', '.join(other_psg_groups)}",
+            "✅ No PSG_DBSAPP_APPRLSE group",
+            "✅ Manual deployment approach",
+            "✅ No CICD deployment mentioned"
+        ]
+
+    else:
+        # UNCLASSIFIED - provide detailed reasoning
+        result["classification"] = "Unclassified"
+        result["confidence"] = "Low"
+        result["reasoning"] = ["❓ Does not match standard CR patterns"]
+
+        # Detailed analysis for unclassified
+        if not any(re.match(r'PSG_DBSAPP_\w+', g) for g in groups):
+            result["issues"].append("❌ No valid PSG_DBSAPP_* groups found")
+
+        if not (has_cicd or has_manual):
+            result["issues"].append("❌ No recognized deployment approach (CICD/Manual)")
+
+        # Suggest possible classification
+        if has_apprlse:
+            if other_psg_groups:
+                result["reasoning"].append("💡 Might be Hybrid - has multiple PSG groups")
+            else:
+                result["reasoning"].append("💡 Might be Auto - has PSG_DBSAPP_APPRLSE")
+        elif other_psg_groups:
+            result["reasoning"].append("💡 Might be Manual - has specific PSG group")
+
+    return result
+
+class StorkGeminiModel(Gemini):
+    token: str
+
+    @cached_property
+    def api_client(self) -> Client:
+        return Client(
+            project=os.environ["GOOGLE_CLOUD_PROJECT"],
+            location=os.environ["GOOGLE_CLOUD_LOCATION"],
+            credentials=Credentials(token=self.token),
+            http_options=types.HttpOptions(
+                api_version="v1",
+                base_url=os.environ["STORK_URL"]
+            ),
+            vertexai=True
+        )
+
+# Authentication
+auth_client = StorkAuthClient(
+    username=os.environ["STORK_USERNAME"],
+    password=os.environ["STORK_PASSWORD"],
+    stork_authn_url=os.environ["STORK_AUTHN_URL"],
+    stork_authn_otp='',
+    stork_authn_otp_type="PUSH"
+)
+
+id_token = auth_client.get_id_token()
+
+# Create the agent
+root_agent = Agent(
+    name="root_agent",
+    model=StorkGeminiModel(token=id_token),
+    description="Agent to classify Change Requests (CRs) as Auto, Hybrid, or Manual based on flat file data (CSV, TSV or TXT).",
+    instruction="""I am a CR (Change Request) classification specialist. I analyze CSV/TSV/TXT data to classify CRs as Auto, Hybrid, or Manual.
+
+**Required Excel Columns:**
+- TicketNumber (or similar: CR ID, Ticket Number, etc.)
+- ImplementerGroup (or similar: Implementer Group, etc.)
+- Deployment Approach (or similar: DeploymentApproach, etc.)
+
+**Classification Rules:**
+
+🤖 **Auto CR:**
+- ImplementerGroup = 'PSG_DBSAPP_APPRLSE' (only this group)
+- Deployment Approach = 'CICD Deployment' (only CICD)
+
+🔄 **Hybrid CR:**
+- ImplementerGroup = 'PSG_DBSAPP_APPRLSE' + 'PSG_DBSAPP_xxxxx' (both types)
+- Deployment Approach = 'CICD Deployment' + 'Manual Deployment' (both)
+
+👤 **Manual CR:**
+- ImplementerGroup = 'PSG_DBSAPP_xxxxx' (specific PSG group, NOT PSG_DBSAPP_APPRLSE)
+- Deployment Approach = 'Manual Deployment' (only manual)
+
+**What I do:**
+1. 🔍 Find the required columns in your provided file
+2. 📊 Analyze each CR row
+3. 🏷️ Classify as Auto/Hybrid/Manual
+4. 📈 Provide summary statistics
+5. 💡 Explain detailed reasoning for each classification
+6. ✅ **For each CR, provide a detailed breakdown of *all* validation checks performed, clearly stating the result (e.g., "Correct format" or the specific issue) for each check.**
+7. ✨ **Present all detailed classification results in a clear, well-structured, and easy-to-read format, using appropriate headings, bullet points, and clear separation for each CR and its validation checks.**
+8. 📁 **Generate a new output file based on your input, which includes an additional 'Validation_Results' column containing the detailed classification and validation checks for each CR.**
+
+To classify your CRs, please provide your CSV/TSV/TXT file as an attachment. I will then process it!""",
+    # tools=[classify_cr_from_excel_file]
+    tools = [classify_cr_from_excel_file_pandas]
+)
+
+def main():
+    """Main function to run the CR classification agent."""
+    print("🚀 CR Classification Agent")
+    print("=" * 60)
+    print("This agent classifies Change Requests as Auto, Hybrid, or Manual")
+    print("from attached file data based on ImplementerGroup and Deployment Approach.")
+    print("\n📋 Required Excel Columns:")
+    print("• TicketNumber (or CR ID, Ticket Number)")
+    print("• ImplementerGroup (or Implementer Group)")
+    print("• Deployment Approach (or DeploymentApproach)")
+    print("\n🏷️ Classification Types:")
+    print("• 🤖 Auto: PSG_DBSAPP_APPRLSE + CICD Deployment")
+    print("• 🔄 Hybrid: PSG_DBSAPP_APPRLSE + PSG_DBSAPP_xxxxx + CICD + Manual")
+    print("• 👤 Manual: PSG_DBSAPP_xxxxx + Manual Deployment")
+    print("=" * 60)
+
+    while True:
+        print("\nOptions:")
+        print("1. Classify CRs from CSV/TSV/TXT content")
+        print("2. Explain classification rules")
+        print("3. Exit")
+
+        choice = input("\nEnter your choice (1-3): ").strip()
+
+        if choice == '1':
+            print("\n📂 Please provide the path to your CSV/TSV/TXT file (e.g., data.csv or data.tsv).")
+            print("💡 Supported formats: .csv, .tsv, .txt")
+            print("📝 Make sure to include the header row with column names.")
+            print("-" * 50)
+
+            file_path = input("Enter file path: ").strip()
+
+            if not file_path:
+                print("❌ No file path provided.")
+                continue
+
+            if not os.path.exists(file_path):
+                print(f"❌ Error: File not found at '{file_path}'")
+                continue
+
+            file_extension = os.path.splitext(file_path)[1].lstrip('.')
+
+            print("\n🔄 Processing your file data...")
+            print("-" * 50)
+
+            try:
+                # Use the agent to classify the CRs
+                if file_extension.lower() in ['csv', 'tsv', 'txt']:
+                    # CSV files need to be opened in text mode
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        response = root_agent.run(
+                            f"Please classify the CRs from this attached file '{os.path.basename(file_path)}'. "
+                            f"For each CR, present its classification, reasoning, and *all individual validation check results* in a clear and structured manner, including whether each check passed or failed.",
+                            tools_input={
+                                'classify_cr_from_excel_file': {'file_object': f, 'file_extension': file_extension}}
+                        )
+                        print(response)
+                else:
+                    print(
+                        f"❌ Error: Unsupported file type: .{file_extension}. Only .csv, .tsv and .txt files are supported.")
+
+            except Exception as e:
+                print(f"❌ Error processing file: {str(e)}")
+                print("💡 Please check your file format and try again.")
+
+        elif choice == '2':
+            print("\n📚 CR Classification Rules:")
+            print("=" * 50)
+
+            response = root_agent.run(
+                "Please explain the detailed classification rules for Auto, Hybrid, and Manual CRs with examples."
+            )
+            print(response)
+
+        elif choice == '3':
+            print("\n👋 Thank you for using the CR Classification Agent!")
+            break
+
+        else:
+            print("❌ Invalid choice. Please enter 1, 2, or 3.")
+
+if __name__ == "__main__":
+            main()
+
+
+------------------------------------------------------------  outputFileGenerator.py -------------------------------------------------
+import datetime
+import os
+
+import pandas as pd
+import io
+from typing import List, Dict, Any, Optional
+
+def _get_validation_summary(cr_result: Optional[Dict[str, Any]]) -> str:
+    if not cr_result:
+        return "No classification data available."
+
+    summary_parts = []
+
+    validation_details = []
+    validations = cr_result.get('validation', [])
+
+    for check in validations:
+        # Assuming validation results from validation_checks are strings like "Checking X ---> Correct format"
+        # or "Checking Y ---> Update Z"
+        if isinstance(check, str) and check.strip():
+            validation_details.append(check.strip())
+
+    if validation_details:
+        validation_text = "; ".join(validation_details)
+        summary_parts.append(f"Validation: {validation_text}")
+
+    if summary_parts:
+        return "; ".join(summary_parts)
+    else:
+        # Fallback if no issues or validation details, but cr_result exists
+        return "No validation issues detected"
+
+def create_output_dataframe_with_validation(
+    df: pd.DataFrame,
+    classification_results: List[Dict[str, Any]],
+    output_filepath: Optional[str] = None
+) -> Optional[str]:
+    """
+    Creates an output file content string by adding a 'Validation_Results' column
+    to the input DataFrame.
+
+    Args:
+        df (pd.DataFrame): The input pandas DataFrame containing the original data.
+        classification_results (List[Dict[str, Any]]): A list of dictionaries, where each
+                                                      dictionary contains classification
+                                                      and validation results for a CR.
+        output_format (str): The desired output format ('csv', 'tsv', 'txt'). Defaults to 'csv'.
+        delimiter (str): The delimiter to use for the output string if format is 'csv', 'tsv', or 'txt'.
+                         Defaults to ','. Ignored for other formats (though currently only CSV/TSV/TXT are supported).
+
+    Returns:
+        str: The content of the new file with an added 'Validation_Results' column, as a string.
+    """
+    if df.empty:
+        raise ValueError("Input DataFrame cannot be empty.")
+
+    output_delimiter = ','
+
+    results_map = {res['row_number'] - 2: res for res in classification_results if res.get('row_number')}
+    # The key in results_map will now correspond to the 0-indexed DataFrame row index.
+
+    validation_column_name = "Validation_Results"
+
+    # Create a new column in the DataFrame for validation results
+    # Initialize with empty string to avoid NaNs if no result is found for a row
+    df_output = df.copy() # Work on a copy to avoid modifying the original DataFrame in place
+    df_output[validation_column_name] = ''
+
+    # Populate the new column
+    for index, row_series in df_output.iterrows():
+        cr_result = results_map.get(index) # Use the 0-indexed DataFrame index
+        validation_summary = _get_validation_summary(cr_result)
+        df_output.at[index, validation_column_name] = validation_summary
+
+    # Convert the DataFrame to a string based on the specified output format
+    if output_filepath:
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        # Split the filepath to insert timestamp before extension
+        file_dir = os.path.dirname(output_filepath)
+        file_name = os.path.basename(output_filepath)
+        name, ext = os.path.splitext(file_name)
+
+        timestamped_filename = f"{name}_{timestamp}{ext}"
+        timestamped_filepath = os.path.join(file_dir, timestamped_filename)
+
+        if os.path.exists(timestamped_filepath):
+            os.remove(timestamped_filepath)
+        df_output.to_csv(timestamped_filepath, sep=output_delimiter, index=False, encoding='utf-8')
+        return None  # File written directly
+    else:
+        output_buffer = io.StringIO()
+        df_output.to_csv(output_buffer, sep=output_delimiter, index=False)
+        return output_buffer.getvalue()
+
+
+-------------------------------------------------------   checks.py  -----------------------------------------------------------
+
+from datetime import datetime, timedelta
+import re
+
+class validation_error(Exception):
+    pass
+
+def check_ChangeNature_and_CodeChange(row: dict) -> str:
+    changeNature = str(row.get('ChangeNature', '')).strip().lower()
+    codeChange = str(row.get('Any application / programme code change', '')).strip().lower()
+    check_name = "Checking ChangeNature and CodeChange"
+
+    if changeNature == 'business enhancement' and codeChange in ['n', 'no']:
+        raise validation_error(f"{check_name} ---> Update 'Any application / programme code change' to YES OR update ChangeNature to 'System/Business recovery & support, capacity upgrades'")
+
+    elif "system/business" in changeNature and 'y' in codeChange:
+        raise validation_error(f"{check_name} ---> Update 'Any application / programme code change' to NO OR update ChangeNature to 'Business Enhancement'")
+
+    else:
+        return f"{check_name} ---> Correct format"
+
+def check_Location_and_ChangeGroup(row: dict) -> str:
+    location = str(row.get('Location', '')).strip().lower()
+    changeGroup = str(row.get('changeGroup', '')).strip().lower()
+    check_name = "Checking Location & ChangeGroup"
+
+    if location == 'pre-prod':
+        if changeGroup == 'project':
+            changeDescription = str(row.get('ChangeDescription', '')).strip().lower()
+            if not changeDescription:
+                raise validation_error(f"{check_name} ---> Update ChangeDescription and mention any pre-prod nodes in the change OR Update Location to 'QA/Prod' and changeGroup to 'BAU'")
+            else:
+                return f"{check_name} --> Correct format"
+        else:
+            raise validation_error(f"{check_name} ---> Update changeGroup to 'PROJECT' and mention any pre-prod nodes in the change")
+    else:
+        return f"{check_name} --> Correct format"
+
+def check_ChangeNature_and_ChangeSummary(row: dict) -> str:
+    changeNature = str(row.get('ChangeNature', '')).strip().lower()
+    changeSummary = str(row.get('ChangeSummary', '')).strip().lower()
+    check_name = "Checking ChangeNature and ChangeSummary"
+
+    keywords = ['bugs', 'fixes', 'remediate', 'repair', 'issues', 'fix']
+    flag = False
+
+    if changeNature == 'fixes':
+        for keyword in keywords:
+            if keyword in changeSummary:
+                flag = True
+                break
+    else:
+        return f"{check_name} --> Correct format"
+
+    if not flag:
+        raise validation_error(f"{check_name} ---> Mention FIXES in ChangeSummary OR Update ChangeNature to 'System/Business' if there is no code change OR Update ChangeNature to 'Business Enhancement' if code is modified.")
+
+    return f"{check_name} --> Correct format"
+
+def check_ChangeSummary_and_ChangeNature(row: dict) -> str:
+    changeSummary = str(row.get('ChangeSummary', '')).strip().lower()
+    changeNature = str(row.get('ChangeNature', '')).strip().lower()
+    check_name = "Checking ChangeNature and ChangeSummary"
+
+    if "eos/eol" in changeSummary:
+        if "tech debt" not in changeNature:
+            raise validation_error(f"{check_name} ---> Update ChangeNature to 'Tech Debt' since ChangeSummary contains 'EOS/EOL' version upgrade.")
+        else:
+            return f"{check_name} ---> Correct format"
+
+    elif "tech debt" in changeNature:
+        if "eos/eol" not in changeNature:
+            raise validation_error(f"{check_name} ---> Update ChangeNature to 'System/Business' if there is no code change OR Update ChangeNature to 'Business Enhancement' if code is modified.")
+        else:
+            return f"{check_name} ---> Correct format"
+
+    return f"{check_name} ---> Correct format"
+
+def check_Location_and_ChangeSummary(row: dict) -> str:
+    location = str(row.get('Location', '')).strip().lower()
+    changeSummary = set(str(row.get('ChangeSummary', '')).strip().lower().split())
+    check_name = "Checking Location and ChangeSummary"
+
+    environments = [
+        'DR',
+        'PAT',
+        'Pre-prod',
+        'Prod',
+        'Prod and DR',
+        'QA'
+    ]
+
+    for env in environments:
+        env_lower = env.lower()
+        env_words = set(env_lower.split())
+
+        if env_words.issubset(changeSummary):
+            if env_lower == location:
+                return f"{check_name} ---> Correct format"
+            else:
+                raise validation_error(f"{check_name} ---> Location ({location}) and ChangeSummary ({env.lower()}) should have similar environments.")
+
+    return f"{check_name} ---> Correct format"
+
+def check_CR_Approval_Status(row: dict) -> str:
+    check_name = "Checking CR Approval Status"
+    return f"{check_name} ---> Not implemented yet."
+
+def check_AppResiliency_and_CRClassification(row: dict) -> str:
+    appResiliency = str(row.get('App Resiliency Classification', '')).strip().lower()
+    crClassification = str(row.get('CR Classification', '')).strip().lower()
+    country = str(row.get('CountryOfOrigin', '')).strip().upper()
+    appGovApprover = str(row.get('Approver1', '')).strip().lower()
+    changeApprover = str(row.get('ChangeManagerApproverName', '')).strip().lower()
+    riskApprover = str(row.get('RiskManagerApproverName', '')).strip().lower()
+    mdApprover = str(row.get('MDApprover', '')).strip().lower()
+
+    check_name = "Checking App Resiliency Classification and CR Classification"
+
+    approverDict = {
+        'SG': {
+            'approver1': ['Bala Krishna POLINA'],
+            'changeManager': 'leonardjiaxun',
+            'riskManager': 'manashvini',
+            'techMD_1': 'Manish KUMAR',
+            'techMD_2': 'Petri TUOMOLA'
+        },
+        'IN': {
+            'approver1': ['Bala Krishna POLINA'],
+            'changeManager': 'vidhyarathanagr',
+            'riskManager': 'arunsingha',
+            'techMD_1': 'Mallya Ramesh',
+            'techMD_2': 'Mallya Ramesh'
+        },
+        'CN': {
+            'approver1': ['Mike Zhi Min CUI', 'Ricky Li Sheng LIU'],
+            'changeManager': 'yunfeisun',
+            'riskManager': 'robinren',
+            'techMD_1': 'Shine Hui Ping WU',
+            'techMD_2': 'Benton Xiao Jun GONG'
+        },
+        'ID': {
+            'approver1': ['Tiwy Eryani'],
+            'changeManager': 'davidirawani',
+            'riskManager': 'estupurwanto',
+            'techMD_1': 'Hardy LIE',
+            'techMD_2': 'Sujatno POLINA'
+        }
+    }
+
+    if appGovApprover not in (approver.lower() for approver in approverDict[country]['approver1']):
+        raise validation_error(f"{check_name} ---> Update Approver1 to {'/ '.join(approverDict[country]['approver1'])}")
+    if changeApprover != approverDict[country]['changeManager'].lower():
+        raise validation_error(f"{check_name} ---> Update ChangeManagerApproverName to {approverDict[country]['changeManager']}")
+    if riskApprover != approverDict[country]['riskManager'].lower():
+        raise validation_error(f"{check_name} ---> Update RiskManagerApproverName to {approverDict[country]['riskManager']}")
+
+    if appResiliency == 'green' and crClassification == 'managed':
+        if mdApprover != approverDict[country]['techMD_1'].lower():
+            raise validation_error(f"{check_name} ---> Update MDApprover to {approverDict[country]['techMD_1']}")
+
+    if appResiliency == 'green monitoring' or crClassification == 'heightened':
+        if mdApprover != approverDict[country]['techMD_2'].lower():
+            raise validation_error(f"{check_name} ---> Update MDApprover to {approverDict[country]['techMD_2']}")
+
+    return f"{check_name} ---> Correct format"
+
+def check_CodeChange_and_ApplicationImpacted(row: dict) -> str:
+    codeChange = str(row.get('Any application / programme code change', '')).strip().lower()
+    appCodes = str(row.get('ApplicationImpacted', '')).split(',')
+    appCodes = set([code.strip() for code in appCodes])
+
+    check_name = "Checking CodeChange and ApplicationImpacted"
+
+    num_apps = len(appCodes) - 1 if 'RAF' in appCodes else len(appCodes)
+    if codeChange == 'yes - more than 3 apps':
+        if num_apps < 3:
+            raise validation_error(f"{check_name} ---> Number of App Codes mentioned in 'ApplicationImpacted' is less than 3 but 'Any application / programme code change' mentions more than 3 apps.")
+        else:
+            crClassification = str(row.get('CR classification', '')).strip().lower()
+            if crClassification != 'Heightened':
+                raise validation_error(f"{check_name} ---> Update CR Classification to 'Heightened'")
+
+    elif codeChange in ['y', 'yes', 'yes - not more than 3 apps']:
+        if num_apps > 3:
+            raise validation_error(f"{check_name} ---> Number of App Codes mentioned in 'ApplicationImpacted' is more than 3 but 'Any application / programme code change' mentions less than 3 apps.")
+
+    return f"{check_name} ---> Correct format"
+
+def check_ReversionApproach(row: dict) -> str:
+    reversionApproach = str(row.get('Reversion Approach', '')).strip().lower()
+    check_name = "Checking Reversion Approach"
+
+    if reversionApproach == '':
+        raise validation_error(f"{check_name} ---> Reversion Approach is empty. How will you revert if there is any issue during deployment?")
+
+    return f"{check_name} ---> Correct format"
+
+def check_UAT_signoff_status(row: dict) -> str:
+    uat_status = str(row.get('UAT', '')).strip().lower()
+    check_name = "Checking UAT signoff status"
+
+    if uat_status == '' or 'NA' in uat_status.upper():
+        raise validation_error(f"{check_name} ---> UAT signoff selected as NA. How are you proceeding QA/PROD without testing in UAT?")
+
+    return f"{check_name} ---> Correct format"
+
+def checking_DeploymentApproach(row: dict) -> str:
+    deploymentApproach = str(row.get('Deployment Approach', '')).strip().lower()
+    check_name = "Checking Deployment Approach"
+
+    deploymentType = 'Blue/Green'
+
+    if deploymentType.lower() in deploymentApproach.lower():
+        raise validation_error(f"{check_name} ---> Give justification for choosing 'Blue/Green' Deployment Approach.")
+
+    return f"{check_name} ---> Correct format"
+
+def check_CyberArk_Objects(row: dict) -> str:
+    cyberArkObjects = str(row.get('CyberarkObjects', '')).strip().lower()
+    check_name = "Checking CyberArk Objects"
+
+    if cyberArkObjects == '' or 'NA' in cyberArkObjects.upper():
+        raise validation_error(f"{check_name} ---> CyberArk objects can't be NA. Please include required objects")
+
+    return f"{check_name} ---> Correct format"
+
+def check_ApplicationImpacted(row: dict) -> str:
+    applicationImpacted = str(row.get('ApplicationImpacted', '')).split(',')
+    applicationImpacted = [application.strip().upper() for application in applicationImpacted]
+    check_name = "Checking Application Impacted"
+
+    num_apps = len(applicationImpacted) - 1 if 'RAF' in applicationImpacted else len(applicationImpacted)
+    if num_apps == 0:
+        raise validation_error(f"{check_name} ---> Only RAF cannot be in application impacted list. There should be at-least one application under DATA")
+
+    return f"{check_name} ---> Correct format"
+
+def check_DownTime_Window(row: dict) -> str:
+    downTime_start = str(row.get('DowntimeStartDateTime', '')).strip()
+    downTime_end = str(row.get('DowntimeEndDateTime', '')).strip()
+    check_name = "Checking DownTime Window"
+
+    if downTime_start == 'nan' and downTime_end == 'nan':
+        return f"{check_name} ---> Correct format"
+
+    if (downTime_start == 'nan') != (downTime_end == 'nan'):
+        raise validation_error(f"{check_name} ---> Both start and end times must be provided or both empty")
+
+    try:
+        downtime_start_dt = datetime.strptime(downTime_start, '%d/%m/%Y %H:%M')
+        downtime_end_dt = datetime.strptime(downTime_end, '%d/%m/%Y %H:%M')
+
+        downtime_duration = downtime_end_dt - downtime_start_dt
+
+        if downtime_duration < timedelta(0):
+            raise validation_error(f"{check_name} ---> DownTime duration can't be less than 0")
+        if downtime_duration > timedelta(hours=3):
+            raise validation_error(f"{check_name} ---> Why was DownTime window greater than 3 hrs? ")
+
+    except (ValueError, TypeError):
+        raise validation_error(f"{check_name} ---> Couldn't parse datetime string.")
+
+    return f"{check_name} ---> Correct format"
+
+def check_changeSummary_and_changeDescription(row: dict) -> str:
+    changeSummary = str(row.get('ChangeSummary', '')).strip().lower()
+    changeDescription = str(row.get('ChangeDescription', '')).strip().lower()
+    check_name = "Checking Change Description"
+
+    if changeDescription == changeSummary or len(changeDescription) < len(changeSummary):
+        raise validation_error(f"{check_name} ---> Summary and description cannot be same as summary cant have too much details like description. It should sound like a title in brief.")
+    return f"{check_name} ---> Correct format"
+
+def check_version_upgrade_format(text):
+    version_pattern = r"v?(\d+(\.\d+){0,4}(?:[a-zA-z][\w.-]*)?)"
+
+    complete_pattern = re.compile(
+        r"(?:version\s+upgrade|upgrade\s+version|upgrade)\s+"
+        r".*?"
+        r"(?:from|frm)\s+"
+        r".*?" + version_pattern + r"\s+"
+        r".*?"
+        r"(?:to|2)\s+"
+        r".*?" + version_pattern,
+        re.IGNORECASE
+    )
+
+    general_upgrade_mention_pattern = re.compile(
+        r"(?:version\s+upgrade|upgrade\s+version|upgrade)",
+        re.IGNORECASE
+    )
+
+    match_complete = complete_pattern.search(text)
+    if match_complete:
+        from_version = match_complete.group(1)
+        to_version = match_complete.group(4)
+        return True, from_version, to_version
+
+    else:
+        match_general = general_upgrade_mention_pattern.search(text)
+        if match_general:
+            return True, None, None
+        else:
+            return False, None, None
+
+def check_changeSummary_for_versionUpgrade(row: dict) -> str:
+    changeSummary = str(row.get('ChangeSummary', '')).lower()
+    changeSummary = [
+        summary.strip() for summary in re.split(r"\.(?:\s+|\n+)", changeSummary) if summary.strip()
+    ]
+    check_name = "Checking Change Summary For Version Upgrade"
+
+    found = False
+    for summary in changeSummary:
+        found, from_version, to_version = check_version_upgrade_format(summary)
+        if found:
+            if from_version is not None and to_version is not None:
+                continue
+            else:
+                raise validation_error(f"{check_name} ---> Version Upgrade not found. Please check.")
+        else:
+            continue
+
+    return f"{check_name} ---> Correct format"
+
+def validation_checks(row: dict) -> list:
+
+    errors =[]
+    statements = []
+
+    checks_to_perform = [
+        check_ChangeNature_and_CodeChange,
+        check_Location_and_ChangeGroup,
+        check_ChangeNature_and_ChangeSummary,
+        check_ChangeSummary_and_ChangeNature,
+        check_Location_and_ChangeSummary,
+        check_CR_Approval_Status,
+        check_AppResiliency_and_CRClassification,
+        check_CodeChange_and_ApplicationImpacted,
+        check_ReversionApproach,
+        check_UAT_signoff_status,
+        checking_DeploymentApproach,
+        check_CyberArk_Objects,
+        check_ApplicationImpacted,
+        check_DownTime_Window,
+        check_changeSummary_and_changeDescription,
+        check_changeSummary_for_versionUpgrade
+    ]
+
+    for check in checks_to_perform:
+        try:
+            result = check(row)
+            statements.append(result)
+        except validation_error as e:
+            errors.append(e)
+            statements.append(str(e))
+        except Exception as e:
+            print("Unexpected error occurred:", e)
+
+    if len(errors) > 0:
+        statements.append("Total validation issues: {} ❌\n".format(len(errors)))
+    else:
+        statements.append("No validation issues found ✅\n")
+
+    return statements
